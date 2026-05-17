@@ -10,6 +10,7 @@ from urllib import parse as urlparse
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
+from .defaults import get_base_url_default, get_model_default
 from .export_loader import DabbleExport
 
 
@@ -304,7 +305,7 @@ def _build_summary(packet: dict[str, Any]) -> str:
     if force_fallback:
         return _build_balanced_summary(packet)
 
-    base_url = os.getenv("OPENAI_BASE_URL") or os.getenv("DABBLE_OPENAI_BASE_URL")
+    base_url = os.getenv("OPENAI_BASE_URL") or os.getenv("DABBLE_OPENAI_BASE_URL") or get_base_url_default()
     api_key = os.getenv("OPENAI_API_KEY") or os.getenv("DABBLE_OPENAI_API_KEY")
     if api_key or _is_local_base_url(base_url):
         return _build_prompt_summary(packet, api_key=api_key, base_url=base_url)
@@ -329,8 +330,8 @@ def _build_prompt_summary(
             "Return 3-5 sentences followed by a short bullet list of named characters or entities explicitly mentioned."
         )
 
-    model = os.getenv("DABBLE_SUMMARY_MODEL", "gpt-5.4-mini")
-    resolved_base_url = base_url or os.getenv("OPENAI_BASE_URL") or os.getenv("DABBLE_OPENAI_BASE_URL") or "https://api.openai.com/v1"
+    model = os.getenv("DABBLE_SUMMARY_MODEL") or get_model_default() or "gpt-5.4-mini"
+    resolved_base_url = base_url or os.getenv("OPENAI_BASE_URL") or os.getenv("DABBLE_OPENAI_BASE_URL") or get_base_url_default() or "https://api.openai.com/v1"
     endpoint = f"{resolved_base_url.rstrip('/')}/chat/completions"
 
     cleaned_source = _strip_source_labels(source_text)

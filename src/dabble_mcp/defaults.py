@@ -63,3 +63,23 @@ def set_export_default(path: str | None) -> dict[str, Any]:
 def set_project_default(project: str | None) -> dict[str, Any]:
     """Set the default project."""
     return set_default("project", project)
+
+
+def get_model_default() -> str | None:
+    """Get the default summary model."""
+    return get_default("model")
+
+
+def set_model_default(model: str | None) -> dict[str, Any]:
+    """Set the default summary model."""
+    return set_default("model", model)
+
+
+def get_base_url_default() -> str | None:
+    """Get the default OpenAI-compatible base URL."""
+    return get_default("base_url")
+
+
+def set_base_url_default(base_url: str | None) -> dict[str, Any]:
+    """Set the default OpenAI-compatible base URL."""
+    return set_default("base_url", base_url)

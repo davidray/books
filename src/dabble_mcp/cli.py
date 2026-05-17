@@ -9,6 +9,8 @@ from .defaults import (
     get_project_default,
     load_defaults,
     set_default,
+    set_base_url_default,
+    set_model_default,
 )
 from .export_loader import DabbleExport
 from .mcp_server import DabbleMcpServer
@@ -80,6 +82,14 @@ def handle_set_defaults(args: argparse.Namespace) -> int:
             defaults = set_default("project", args.arg[i + 1])
             print(f"Project default set to: {args.arg[i + 1]}")
             i += 2
+        elif key == "model" and i + 1 < len(args.arg):
+            defaults = set_model_default(args.arg[i + 1])
+            print(f"Model default set to: {args.arg[i + 1]}")
+            i += 2
+        elif key == "base-url" and i + 1 < len(args.arg):
+            defaults = set_base_url_default(args.arg[i + 1])
+            print(f"Base URL default set to: {args.arg[i + 1]}")
+            i += 2
         else:
             print(f"Unknown option or missing value: {key}", file=__import__("sys").stderr)
             return 1
@@ -109,10 +119,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("list-projects", help="List projects in the export")
     
-    subparsers.add_parser("set-defaults", help="Set default export and/or project").add_argument(
+    subparsers.add_parser("set-defaults", help="Set default export, project, model, and/or base-url").add_argument(
         "arg",
         nargs="*",
-        help="Set defaults: 'export <path>' or 'project <project_id>' or both",
+        help="Set defaults: 'export <path>', 'project <project_id>', 'model <model_name>', 'base-url <url>', or combinations",
     )
 
     subparsers.add_parser("list-defaults", help="List current default export and project")

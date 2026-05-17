@@ -13,30 +13,33 @@ This repository now includes a small local app for querying Dabble exports and e
 
 ## Quick start
 
-Create a virtual environment if you want one, then run the CLI directly from the repo root:
+Create a virtual environment with Python 3.11 and install the package:
 
 ```bash
-PYTHONPATH=src python -m dabble_mcp.cli --export Exports/dabble-Vca481KELEbtliXfXKHxHpzRNqo2-2026-05-17T08_15_32.740Z.json list-projects
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+Then run the CLI:
+
+```bash
+dabble-mcp --export Exports/dabble-Vca481KELEbtliXfXKHxHpzRNqo2-2026-05-17T08_15_32.740Z.json list-projects
 ```
 
 `--export` accepts either a full/relative path or just the filename if the file is inside `Exports/`.
 
-Or install the package in editable mode:
-
-```bash
-pip install -e .
-dabble-mcp --export Exports/dabble-Vca481KELEbtliXfXKHxHpzRNqo2-2026-05-17T08_15_32.740Z.json list-projects
-```
-
 ## Setting defaults
 
-You can set default values for `--export` and `--project` to avoid specifying them in every command:
+You can set default values for `--export`, `--project`, `model`, and `base-url` to avoid specifying them in every command:
 
 ```bash
 # Set defaults
 dabble-mcp set-defaults export <path>
 dabble-mcp set-defaults project <project_id>
-dabble-mcp set-defaults export <path> project <project_id>
+dabble-mcp set-defaults model <model_name>
+dabble-mcp set-defaults base-url <url>
+dabble-mcp set-defaults export <path> project <project_id> model <model_name> base-url <url>
 
 # List current defaults
 dabble-mcp list-defaults
@@ -93,7 +96,7 @@ dabble-mcp --export <export.json> serve
 Point your MCP client at the stdio command below:
 
 ```bash
-PYTHONPATH=src python -m dabble_mcp.cli --export /absolute/path/to/export.json serve
+dabble-mcp --export /absolute/path/to/export.json serve
 ```
 
 The server exposes these tools:
@@ -124,21 +127,27 @@ The server exposes these tools:
 Example:
 
 ```bash
-PYTHONPATH=src python -m dabble_mcp.cli --export <export.json> --project "JOAT Alternate Order" build-summary-tasks .dabble-tasks/dccdSKkJDkAuyl9Z
-PYTHONPATH=src python -m dabble_mcp.cli --export <export.json> run-summary-tasks .dabble-tasks/dccdSKkJDkAuyl9Z
-PYTHONPATH=src python -m dabble_mcp.cli --export <export.json> task-status .dabble-tasks/dccdSKkJDkAuyl9Z
-PYTHONPATH=src python -m dabble_mcp.cli --export <export.json> compile-brief .dabble-tasks/dccdSKkJDkAuyl9Z
+dabble-mcp --export <export.json> --project "JOAT Alternate Order" build-summary-tasks .dabble-tasks/dccdSKkJDkAuyl9Z
+dabble-mcp --export <export.json> run-summary-tasks .dabble-tasks/dccdSKkJDkAuyl9Z
+dabble-mcp --export <export.json> task-status .dabble-tasks/dccdSKkJDkAuyl9Z
+dabble-mcp --export <export.json> compile-brief .dabble-tasks/dccdSKkJDkAuyl9Z
 ```
 
 ### Ollama local setup
 
-Install Ollama, pull the model, and point the summary workflow at the local OpenAI-compatible endpoint:
+Install Ollama, pull the model, and configure the summary workflow via persistent defaults:
 
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
 ollama serve
 ollama pull qwen2.5:14b-instruct
 
+dabble-mcp set-defaults model qwen2.5:14b-instruct base-url http://localhost:11434/v1
+```
+
+Or use environment variables instead:
+
+```bash
 export OPENAI_BASE_URL=http://localhost:11434/v1
 export DABBLE_SUMMARY_MODEL=qwen2.5:14b-instruct
 ```
@@ -146,7 +155,7 @@ export DABBLE_SUMMARY_MODEL=qwen2.5:14b-instruct
 Then run:
 
 ```bash
-PYTHONPATH=src python -m dabble_mcp.cli --export <export.json> run-summary-tasks .dabble-tasks/<project_id>
+dabble-mcp --export <export.json> run-summary-tasks .dabble-tasks/<project_id>
 ```
 
 Each chapter packet includes a strict prompt template that tells the agent to stay inside the supplied evidence and admit when the source is incomplete.
