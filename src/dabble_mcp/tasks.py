@@ -5,7 +5,7 @@ import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib import parse as urlparse
 from urllib import error as urlerror
 from urllib import request as urlrequest
@@ -101,9 +101,12 @@ def run_summary_tasks(
     _reconcile_status_tasks(task_dir, status_doc)
     _sync_pending_statuses(status_doc)
 
-    task_files = _list_task_files(task_dir)
-
-    effective_limit = _resolve_summary_task_limit(limit)
+    task_files = sorted(
+        file_path
+        for file_path in task_dir.glob("*.json")
+        if file_path.name != "manifest.json"
+        and file_path.name != "task-status.json"
+    )
 
     processed = 0
     skipped_existing = 0
@@ -113,30 +116,65 @@ def run_summary_tasks(
     written_files: list[str] = []
 
     for task_file in task_files:
-        if effective_limit is not None and processed >= effective_limit:
+        if limit is not None and processed >= limit:
             skipped_limit += 1
             continue
 
-        task_context = _load_task_context(task_dir, task_file, status_doc)
-        if task_context is None:
+        packet = json.loads(task_file.read_text(encoding="utf-8"))
+        chapter_id = packet.get("chapter_id")
+        if not chapter_id:
             continue
 
-        current_status = task_context["status"]
+        result_file = result_dir / f"{chapter_id}.json"
+        task_key = task_file.name
+        status_doc["tasks"].setdefault(
+            task_key,
+            {
+                "chapter_id": chapter_id,
+                "task_file": str(task_file),
+                "result_file": str(result_file),
+                "status": "pending",
+                "updated_at": _iso_now(),
+                "error": None,
+            },
+        )
+        current_status = status_doc["tasks"][task_key].get("status", "pending")
         if status_filter and current_status != status_filter:
             skipped_filter += 1
             continue
 
-        outcome = _process_summary_task(task_dir, task_file, status_doc, overwrite=overwrite)
-        if outcome["outcome"] == "processed":
-            processed += 1
-            written_files.append(str(outcome["written_file"]))
-        elif outcome["outcome"] == "failed":
-            failed += 1
-        elif outcome["outcome"] == "skipped_existing":
+        if result_file.exists() and not overwrite:
             skipped_existing += 1
+            status_doc["tasks"][task_key]["status"] = "completed"
+            status_doc["tasks"][task_key]["error"] = None
+            status_doc["tasks"][task_key]["updated_at"] = _iso_now()
+            continue
+
+        try:
+            summary = _build_summary(packet)
+            evidence = _build_evidence(packet)
+            written_path = save_task_result(
+                task_dir,
+                chapter_id,
+                summary,
+                evidence,
+                chapter_title=packet.get("chapter_title"),
+                chapter_order=packet.get("chapter_order"),
+            )
+            written_files.append(written_path)
+            processed += 1
+            status_doc["tasks"][task_key]["status"] = "completed"
+            status_doc["tasks"][task_key]["error"] = None
+            status_doc["tasks"][task_key]["updated_at"] = _iso_now()
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            status_doc["tasks"][task_key]["status"] = "failed"
+            status_doc["tasks"][task_key]["error"] = str(exc)
+            status_doc["tasks"][task_key]["updated_at"] = _iso_now()
 
     _sync_pending_statuses(status_doc)
-    _write_status_doc(status_path, status_doc)
+    status_doc["updated_at"] = _iso_now()
+    status_path.write_text(json.dumps(status_doc, ensure_ascii=False, indent=2), encoding="utf-8")
 
     return {
         "task_dir": str(task_dir),
@@ -146,94 +184,6 @@ def run_summary_tasks(
         "skipped_limit": skipped_limit,
         "skipped_filter": skipped_filter,
         "applied_filter": status_filter or "all",
-        "effective_limit": effective_limit,
-        "status_file": str(status_path),
-        "written_files": written_files,
-    }
-
-
-def run_summary_task_queue(
-    output_dir: str | Path,
-    *,
-    overwrite: bool = False,
-    limit: int | None = None,
-    status_filter: str | None = None,
-    progress_callback: Callable[[dict[str, Any]], None] | None = None,
-) -> dict[str, Any]:
-    task_dir = Path(output_dir)
-    result_dir = task_dir / "results"
-    result_dir.mkdir(parents=True, exist_ok=True)
-    status_path = task_dir / "task-status.json"
-    status_doc = _load_status_doc(task_dir)
-    _reconcile_status_tasks(task_dir, status_doc)
-    _sync_pending_statuses(status_doc)
-
-    planned_tasks = _plan_summary_queue(task_dir, status_doc, overwrite=overwrite, status_filter=status_filter)
-    effective_limit = None if limit is None or limit <= 0 else limit
-    if effective_limit is not None:
-        planned_tasks = planned_tasks[:effective_limit]
-
-    total_queued = len(planned_tasks)
-    if progress_callback is not None:
-        progress_callback(
-            {
-                "event": "queue_started",
-                "task_dir": str(task_dir),
-                "total": total_queued,
-                "status_filter": status_filter or "all",
-                "overwrite": overwrite,
-            }
-        )
-
-    processed = 0
-    failed = 0
-    skipped_existing = 0
-    written_files: list[str] = []
-
-    for index, task_info in enumerate(planned_tasks, start=1):
-        if progress_callback is not None:
-            progress_callback(
-                {
-                    "event": "task_started",
-                    "index": index,
-                    "total": total_queued,
-                    **task_info,
-                }
-            )
-
-        outcome = _process_summary_task(task_dir, Path(task_info["task_file"]), status_doc, overwrite=overwrite)
-        _sync_pending_statuses(status_doc)
-        _write_status_doc(status_path, status_doc)
-
-        if outcome["outcome"] == "processed":
-            processed += 1
-            written_files.append(str(outcome["written_file"]))
-        elif outcome["outcome"] == "failed":
-            failed += 1
-        elif outcome["outcome"] == "skipped_existing":
-            skipped_existing += 1
-
-        if progress_callback is not None:
-            progress_callback(
-                {
-                    "event": "task_finished",
-                    "index": index,
-                    "total": total_queued,
-                    **task_info,
-                    **outcome,
-                }
-            )
-
-    final_status = get_task_status(task_dir)
-    return {
-        "task_dir": str(task_dir),
-        "queued": total_queued,
-        "processed": processed,
-        "failed": failed,
-        "skipped_existing": skipped_existing,
-        "remaining": final_status["pending"] + final_status["failed"],
-        "applied_filter": status_filter or "all",
-        "effective_limit": effective_limit,
         "status_file": str(status_path),
         "written_files": written_files,
     }
@@ -360,142 +310,6 @@ def _build_summary(packet: dict[str, Any]) -> str:
     if api_key or _is_local_base_url(base_url):
         return _build_prompt_summary(packet, api_key=api_key, base_url=base_url)
     return _build_balanced_summary(packet)
-
-
-def _resolve_summary_task_limit(limit: int | None) -> int | None:
-    if limit is not None:
-        return None if limit <= 0 else limit
-
-    base_url = os.getenv("OPENAI_BASE_URL") or os.getenv("DABBLE_OPENAI_BASE_URL") or get_base_url_default()
-    if not _is_local_base_url(base_url):
-        return None
-
-    configured_limit = os.getenv("DABBLE_SUMMARY_MAX_TASKS", "1").strip()
-    if not configured_limit:
-        return 1
-
-    try:
-        parsed_limit = int(configured_limit)
-    except ValueError:
-        return 1
-    return None if parsed_limit <= 0 else parsed_limit
-
-
-def _list_task_files(task_dir: Path) -> list[Path]:
-    return sorted(
-        file_path
-        for file_path in task_dir.glob("*.json")
-        if file_path.name not in {"manifest.json", "task-status.json"}
-    )
-
-
-def _load_task_context(task_dir: Path, task_file: Path, status_doc: dict[str, Any]) -> dict[str, Any] | None:
-    packet = json.loads(task_file.read_text(encoding="utf-8"))
-    chapter_id = packet.get("chapter_id")
-    if not chapter_id:
-        return None
-
-    result_file = task_dir / "results" / f"{chapter_id}.json"
-    task_key = task_file.name
-    status_doc["tasks"].setdefault(
-        task_key,
-        {
-            "chapter_id": chapter_id,
-            "task_file": str(task_file),
-            "result_file": str(result_file),
-            "status": "pending",
-            "updated_at": _iso_now(),
-            "error": None,
-        },
-    )
-    return {
-        "packet": packet,
-        "chapter_id": chapter_id,
-        "result_file": result_file,
-        "task_key": task_key,
-        "status": status_doc["tasks"][task_key].get("status", "pending"),
-    }
-
-
-def _process_summary_task(
-    task_dir: Path,
-    task_file: Path,
-    status_doc: dict[str, Any],
-    *,
-    overwrite: bool,
-) -> dict[str, Any]:
-    task_context = _load_task_context(task_dir, task_file, status_doc)
-    if task_context is None:
-        return {"outcome": "skipped_invalid", "written_file": None, "error": "Missing chapter_id"}
-
-    packet = task_context["packet"]
-    chapter_id = task_context["chapter_id"]
-    result_file = task_context["result_file"]
-    task_key = task_context["task_key"]
-
-    if result_file.exists() and not overwrite:
-        status_doc["tasks"][task_key]["status"] = "completed"
-        status_doc["tasks"][task_key]["error"] = None
-        status_doc["tasks"][task_key]["updated_at"] = _iso_now()
-        return {"outcome": "skipped_existing", "written_file": None, "error": None}
-
-    try:
-        summary = _build_summary(packet)
-        evidence = _build_evidence(packet)
-        written_path = save_task_result(
-            task_dir,
-            chapter_id,
-            summary,
-            evidence,
-            chapter_title=packet.get("chapter_title"),
-            chapter_order=packet.get("chapter_order"),
-        )
-        status_doc["tasks"][task_key]["status"] = "completed"
-        status_doc["tasks"][task_key]["error"] = None
-        status_doc["tasks"][task_key]["updated_at"] = _iso_now()
-        return {"outcome": "processed", "written_file": written_path, "error": None}
-    except Exception as exc:  # noqa: BLE001
-        status_doc["tasks"][task_key]["status"] = "failed"
-        status_doc["tasks"][task_key]["error"] = str(exc)
-        status_doc["tasks"][task_key]["updated_at"] = _iso_now()
-        return {"outcome": "failed", "written_file": None, "error": str(exc)}
-
-
-def _plan_summary_queue(
-    task_dir: Path,
-    status_doc: dict[str, Any],
-    *,
-    overwrite: bool,
-    status_filter: str | None,
-) -> list[dict[str, Any]]:
-    planned: list[dict[str, Any]] = []
-    for task_file in _list_task_files(task_dir):
-        task_context = _load_task_context(task_dir, task_file, status_doc)
-        if task_context is None:
-            continue
-
-        status = task_context["status"]
-        if status_filter and status != status_filter:
-            continue
-        if not overwrite and not status_filter and status == "completed":
-            continue
-
-        packet = task_context["packet"]
-        planned.append(
-            {
-                "task_file": str(task_file),
-                "chapter_id": task_context["chapter_id"],
-                "chapter_title": packet.get("chapter_title"),
-                "chapter_order": packet.get("chapter_order"),
-                "status": status,
-            }
-        )
-    return planned
-
-
-def _write_status_doc(status_path: Path, status_doc: dict[str, Any]) -> None:
-    status_doc["updated_at"] = _iso_now()
-    status_path.write_text(json.dumps(status_doc, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _build_prompt_summary(
