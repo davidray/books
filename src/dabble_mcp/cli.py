@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from .defaults import (
@@ -18,6 +19,7 @@ from .tasks import (
     cleanup_successful_tasks,
     compile_story_brief,
     get_task_status,
+    run_summary_task_queue,
     run_summary_tasks,
     write_chapter_summary_tasks,
 )
@@ -106,6 +108,36 @@ def handle_list_defaults() -> int:
     return 0
 
 
+def emit_queue_progress(event: dict[str, object]) -> None:
+    event_type = str(event.get("event") or "")
+    if event_type == "queue_started":
+        total = int(event.get("total") or 0)
+        print(
+            f"Queueing {total} chapter task(s) from {event.get('task_dir')}",
+            file=sys.stderr,
+        )
+        return
+
+    index = int(event.get("index") or 0)
+    total = int(event.get("total") or 0)
+    chapter_order = event.get("chapter_order")
+    chapter_title = str(event.get("chapter_title") or event.get("chapter_id") or "unknown chapter")
+    chapter_label = f"Chapter {chapter_order}: {chapter_title}" if chapter_order else chapter_title
+
+    if event_type == "task_started":
+        print(f"[{index}/{total}] Running {chapter_label}", file=sys.stderr)
+        return
+
+    outcome = str(event.get("outcome") or "")
+    if outcome == "processed":
+        message = f"[{index}/{total}] Completed {chapter_label}"
+    elif outcome == "failed":
+        message = f"[{index}/{total}] Failed {chapter_label}: {event.get('error')}"
+    else:
+        message = f"[{index}/{total}] Skipped {chapter_label}"
+    print(message, file=sys.stderr)
+
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Query Dabble exports and expose grounded story tools.")
@@ -140,22 +172,44 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--limit", type=int, default=20)
 
     tasks_parser = subparsers.add_parser("build-summary-tasks", help="Write per-chapter packets for later agent sessions")
-    tasks_parser.add_argument("arg1")
+    tasks_parser.add_argument("arg1", nargs="?")
     tasks_parser.add_argument("arg2", nargs="?")
 
     run_tasks_parser = subparsers.add_parser(
         "run-summary-tasks",
         help="Execute generated summary tasks and write grounded result files",
     )
-    run_tasks_parser.add_argument("output_dir")
+    run_tasks_parser.add_argument("output_dir", nargs="?")
     run_tasks_parser.add_argument("--overwrite", action="store_true", help="Overwrite existing chapter results")
-    run_tasks_parser.add_argument("--limit", type=int, help="Process only the first N pending tasks")
+    run_tasks_parser.add_argument(
+        "--limit",
+        type=int,
+        help=(
+            "Process only the first N matching tasks. Use 0 for no cap. "
+            "If omitted, local OpenAI-compatible backends default to 1 task per run."
+        ),
+    )
     run_filter_group = run_tasks_parser.add_mutually_exclusive_group()
     run_filter_group.add_argument("--pending-only", action="store_true", help="Run only tasks currently marked pending")
     run_filter_group.add_argument("--failed-only", action="store_true", help="Run only tasks currently marked failed")
 
+    queue_tasks_parser = subparsers.add_parser(
+        "queue-summary-tasks",
+        help="Queue summary tasks sequentially with command-line progress output",
+    )
+    queue_tasks_parser.add_argument("output_dir", nargs="?")
+    queue_tasks_parser.add_argument("--overwrite", action="store_true", help="Overwrite existing chapter results")
+    queue_tasks_parser.add_argument(
+        "--limit",
+        type=int,
+        help="Queue at most N matching tasks. Omit to queue all matching chapters. Use 0 for no cap.",
+    )
+    queue_filter_group = queue_tasks_parser.add_mutually_exclusive_group()
+    queue_filter_group.add_argument("--pending-only", action="store_true", help="Queue only tasks currently marked pending")
+    queue_filter_group.add_argument("--failed-only", action="store_true", help="Queue only tasks currently marked failed")
+
     status_parser = subparsers.add_parser("task-status", help="Show per-task status for a generated task directory")
-    status_parser.add_argument("output_dir")
+    status_parser.add_argument("output_dir", nargs="?")
     status_filter_group = status_parser.add_mutually_exclusive_group()
     status_filter_group.add_argument("--pending-only", action="store_true", help="Show only pending tasks")
     status_filter_group.add_argument("--failed-only", action="store_true", help="Show only failed tasks")
@@ -165,15 +219,22 @@ def build_parser() -> argparse.ArgumentParser:
         "cleanup-successful-tasks",
         help="Delete completed task packet files, optionally deleting result files too",
     )
-    cleanup_parser.add_argument("output_dir")
+    cleanup_parser.add_argument("output_dir", nargs="?")
     cleanup_parser.add_argument("--remove-results", action="store_true", help="Also delete completed result files")
     cleanup_parser.add_argument("--dry-run", action="store_true", help="Show what would be deleted without changing files")
 
     brief_parser = subparsers.add_parser("compile-brief", help="Combine saved chapter summaries into a story brief")
-    brief_parser.add_argument("output_dir")
+    brief_parser.add_argument("output_dir", nargs="?")
 
     subparsers.add_parser("serve", help="Run the MCP server over stdio")
     return parser
+
+
+def resolve_output_dir(args: argparse.Namespace, project_id: str, parser: argparse.ArgumentParser) -> Path:
+    """Return the output_dir Path, defaulting to .dabble-tasks/<project_id>."""
+    if args.output_dir:
+        return Path(args.output_dir)
+    return Path(".dabble-tasks") / project_id
 
 
 def main() -> int:
@@ -234,29 +295,47 @@ def main() -> int:
         print(json.dumps(export_data.search_text(project_id, query, args.limit), ensure_ascii=False, indent=2))
         return 0
     if args.command == "build-summary-tasks":
-        if args.arg2 is None:
+        if args.arg1 is None and args.arg2 is None:
+            # No positional args: need a default project; output_dir derived from project_id
             if not args.project and not project_arg:
                 parser.error(
                     "build-summary-tasks requires <project_id> <output_dir> or --project <project> <output_dir> or set default project"
                 )
             project_ref = args.project or project_arg
-            output_dir = args.arg1
+            project_id = resolve_project_id(export_data, project_ref)
+            output_dir = Path(".dabble-tasks") / project_id
+        elif args.arg2 is None:
+            if not args.project and not project_arg:
+                parser.error(
+                    "build-summary-tasks requires <project_id> <output_dir> or --project <project> <output_dir> or set default project"
+                )
+            project_ref = args.project or project_arg
+            output_dir = Path(args.arg1)
+            project_id = resolve_project_id(export_data, project_ref)
         else:
             project_ref = args.project or project_arg or args.arg1
-            output_dir = args.arg2
-        project_id = resolve_project_id(export_data, project_ref)
+            output_dir = Path(args.arg2)
+            project_id = resolve_project_id(export_data, project_ref)
         print(
             json.dumps(
-                write_chapter_summary_tasks(export_data, project_id, Path(output_dir)),
+                write_chapter_summary_tasks(export_data, project_id, output_dir),
                 ensure_ascii=False,
                 indent=2,
             )
         )
         return 0
     if args.command == "compile-brief":
-        print(json.dumps(compile_story_brief(Path(args.output_dir)), ensure_ascii=False, indent=2))
+        default_project_id = resolve_project_id(export_data, project_arg) if project_arg else None
+        output_dir = resolve_output_dir(args, default_project_id or "", parser)
+        if not args.output_dir and not default_project_id:
+            parser.error("compile-brief requires output_dir or a default project set via set-defaults")
+        print(json.dumps(compile_story_brief(output_dir), ensure_ascii=False, indent=2))
         return 0
     if args.command == "run-summary-tasks":
+        default_project_id = resolve_project_id(export_data, project_arg) if project_arg else None
+        if not args.output_dir and not default_project_id:
+            parser.error("run-summary-tasks requires output_dir or a default project set via set-defaults")
+        output_dir = resolve_output_dir(args, default_project_id or "", parser)
         status_filter = None
         if args.pending_only:
             status_filter = "pending"
@@ -265,7 +344,7 @@ def main() -> int:
         print(
             json.dumps(
                 run_summary_tasks(
-                    Path(args.output_dir),
+                    output_dir,
                     overwrite=args.overwrite,
                     limit=args.limit,
                     status_filter=status_filter,
@@ -275,7 +354,35 @@ def main() -> int:
             )
         )
         return 0
+    if args.command == "queue-summary-tasks":
+        default_project_id = resolve_project_id(export_data, project_arg) if project_arg else None
+        if not args.output_dir and not default_project_id:
+            parser.error("queue-summary-tasks requires output_dir or a default project set via set-defaults")
+        output_dir = resolve_output_dir(args, default_project_id or "", parser)
+        status_filter = None
+        if args.pending_only:
+            status_filter = "pending"
+        elif args.failed_only:
+            status_filter = "failed"
+        print(
+            json.dumps(
+                run_summary_task_queue(
+                    output_dir,
+                    overwrite=args.overwrite,
+                    limit=args.limit,
+                    status_filter=status_filter,
+                    progress_callback=emit_queue_progress,
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
     if args.command == "task-status":
+        default_project_id = resolve_project_id(export_data, project_arg) if project_arg else None
+        if not args.output_dir and not default_project_id:
+            parser.error("task-status requires output_dir or a default project set via set-defaults")
+        output_dir = resolve_output_dir(args, default_project_id or "", parser)
         status_filter = None
         if args.pending_only:
             status_filter = "pending"
@@ -285,17 +392,21 @@ def main() -> int:
             status_filter = "completed"
         print(
             json.dumps(
-                get_task_status(Path(args.output_dir), status_filter=status_filter),
+                get_task_status(output_dir, status_filter=status_filter),
                 ensure_ascii=False,
                 indent=2,
             )
         )
         return 0
     if args.command == "cleanup-successful-tasks":
+        default_project_id = resolve_project_id(export_data, project_arg) if project_arg else None
+        if not args.output_dir and not default_project_id:
+            parser.error("cleanup-successful-tasks requires output_dir or a default project set via set-defaults")
+        output_dir = resolve_output_dir(args, default_project_id or "", parser)
         print(
             json.dumps(
                 cleanup_successful_tasks(
-                    Path(args.output_dir),
+                    output_dir,
                     remove_results=args.remove_results,
                     dry_run=args.dry_run,
                 ),
