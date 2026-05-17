@@ -23,7 +23,7 @@ This repository now includes a small local app for querying Dabble exports and e
 Create a virtual environment if you want one, then run the CLI directly from the repo root:
 
 ```bash
-PYTHONPATH=src python -m dabble_mcp.cli --export Exports/dabble-Vca481KELEbtliXfXKHxHpzRNqo2-2026-05-17T08_15_32.740Z.json list-projects
+PYTHONPATH=src python3.11 -m dabble_mcp.cli --export Exports/dabble-Vca481KELEbtliXfXKHxHpzRNqo2-2026-05-17T08_15_32.740Z.json list-projects
 ```
 
 `--export` accepts either a full/relative path or just the filename if the file is inside `Exports/`.
@@ -37,13 +37,15 @@ dabble-mcp --export Exports/dabble-Vca481KELEbtliXfXKHxHpzRNqo2-2026-05-17T08_15
 
 ## Setting defaults
 
-You can set default values for `--export` and `--project` to avoid specifying them in every command:
+You can set default values for `--export`, `--project`, `model`, and `base-url` to avoid specifying them in every command:
 
 ```bash
 # Set defaults
 dabble-mcp set-defaults export <path>
 dabble-mcp set-defaults project <project_id>
-dabble-mcp set-defaults export <path> project <project_id>
+dabble-mcp set-defaults model <model_name>
+dabble-mcp set-defaults base-url <url>
+dabble-mcp set-defaults export <path> project <project_id> model <model_name> base-url <url>
 
 # List current defaults
 dabble-mcp list-defaults
@@ -100,7 +102,7 @@ dabble-mcp --export <export.json> serve
 Point your MCP client at the stdio command below:
 
 ```bash
-PYTHONPATH=src python -m dabble_mcp.cli --export /absolute/path/to/export.json serve
+PYTHONPATH=src python3.11 -m dabble_mcp.cli --export /absolute/path/to/export.json serve
 ```
 
 The server exposes these tools:
@@ -120,6 +122,7 @@ The server exposes these tools:
 	This also writes `.dabble-tasks/<project_id>/task-status.json` with per-task `pending`, `completed`, or `failed` state.
 	Use `--pending-only` or `--failed-only` to rerun only targeted subsets.
 	If `OPENAI_API_KEY` (or `DABBLE_OPENAI_API_KEY`) is set, summaries are generated from each packet's `prompt_template` using an OpenAI-compatible chat completions API.
+	Local OpenAI-compatible servers on `localhost` such as Ollama can be used without an API key by setting `OPENAI_BASE_URL` or `DABBLE_OPENAI_BASE_URL`.
 	Long chapters are chunked and summarized in multiple passes so the final summary reflects beginning, middle, and ending events.
 	Optional overrides: `DABBLE_SUMMARY_MODEL` (default `gpt-5.4-mini`), `DABBLE_SUMMARY_CHUNK_CHARS` (default `18000`), and `OPENAI_BASE_URL`/`DABBLE_OPENAI_BASE_URL`.
 	If no model credentials are configured, the command falls back to a deterministic balanced summary. To force fallback even when a key exists, set `DABBLE_FORCE_FALLBACK_SUMMARY=1`.
@@ -130,10 +133,35 @@ The server exposes these tools:
 Example:
 
 ```bash
-PYTHONPATH=src python -m dabble_mcp.cli --export <export.json> --project "JOAT Alternate Order" build-summary-tasks .dabble-tasks/dccdSKkJDkAuyl9Z
-PYTHONPATH=src python -m dabble_mcp.cli --export <export.json> run-summary-tasks .dabble-tasks/dccdSKkJDkAuyl9Z
-PYTHONPATH=src python -m dabble_mcp.cli --export <export.json> task-status .dabble-tasks/dccdSKkJDkAuyl9Z
-PYTHONPATH=src python -m dabble_mcp.cli --export <export.json> compile-brief .dabble-tasks/dccdSKkJDkAuyl9Z
+PYTHONPATH=src python3.11 -m dabble_mcp.cli --export <export.json> --project "JOAT Alternate Order" build-summary-tasks .dabble-tasks/dccdSKkJDkAuyl9Z
+PYTHONPATH=src python3.11 -m dabble_mcp.cli --export <export.json> run-summary-tasks .dabble-tasks/dccdSKkJDkAuyl9Z
+PYTHONPATH=src python3.11 -m dabble_mcp.cli --export <export.json> task-status .dabble-tasks/dccdSKkJDkAuyl9Z
+PYTHONPATH=src python3.11 -m dabble_mcp.cli --export <export.json> compile-brief .dabble-tasks/dccdSKkJDkAuyl9Z
+```
+
+### Ollama local setup
+
+Install Ollama, pull the model, and configure the summary workflow via persistent defaults:
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+ollama serve
+ollama pull qwen2.5:14b-instruct
+
+dabble-mcp set-defaults model qwen2.5:14b-instruct base-url http://localhost:11434/v1
+```
+
+Or use environment variables instead:
+
+```bash
+export OPENAI_BASE_URL=http://localhost:11434/v1
+export DABBLE_SUMMARY_MODEL=qwen2.5:14b-instruct
+```
+
+Then run:
+
+```bash
+PYTHONPATH=src python3.11 -m dabble_mcp.cli --export <export.json> run-summary-tasks .dabble-tasks/<project_id>
 ```
 
 Each chapter packet includes a strict prompt template that tells the agent to stay inside the supplied evidence and admit when the source is incomplete.
