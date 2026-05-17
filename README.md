@@ -1,1 +1,158 @@
 # books
+
+This repository now includes a small local app for querying Dabble exports and exposing them through an MCP-compatible stdio server.
+
+## What it does
+
+- Loads a Dabble export JSON file.
+- Reconstructs the latest project state from the newest snapshot plus trailing patch operations.
+- Treats only content under the `manuscript` tree as novel content; notes and non-manuscript branches are ignored.
+- Exposes project, outline, chapter packet, and text search tools through MCP.
+- Writes one grounded chapter-summary task packet per chapter so multiple agent sessions can process a novel incrementally.
+- Persists chapter summary results and combines them into a novel-level brief.
+
+## Quick start
+
+Create a virtual environment if you want one, then run the CLI directly from the repo root:
+
+```bash
+PYTHONPATH=src python -m dabble_mcp.cli --export Exports/dabble-Vca481KELEbtliXfXKHxHpzRNqo2-2026-05-17T08_15_32.740Z.json list-projects
+```
+
+`--export` accepts either a full/relative path or just the filename if the file is inside `Exports/`.
+
+Or install the package in editable mode:
+
+```bash
+pip install -e .
+dabble-mcp --export Exports/dabble-Vca481KELEbtliXfXKHxHpzRNqo2-2026-05-17T08_15_32.740Z.json list-projects
+```
+
+## Setting defaults
+
+You can set default values for `--export` and `--project` to avoid specifying them in every command:
+
+```bash
+# Set defaults
+dabble-mcp set-defaults export <path>
+dabble-mcp set-defaults project <project_id>
+dabble-mcp set-defaults export <path> project <project_id>
+
+# List current defaults
+dabble-mcp list-defaults
+```
+
+Defaults are stored in `.dabble-tasks/defaults.json` and are preserved when cleaning up task files.
+
+## CLI commands
+
+With defaults set, you can omit `--export` and `--project`:
+
+```bash
+# Using defaults
+dabble-mcp list-projects
+dabble-mcp outline <project_id>
+dabble-mcp chapter-packet <chapter_id>
+dabble-mcp search "search text"
+
+# Overriding defaults
+dabble-mcp --export <other.json> list-projects
+dabble-mcp --project "<other project>" outline
+```
+
+All commands support optional `--export` and `--project` flags to override defaults:
+
+```bash
+dabble-mcp --export <export.json> list-projects
+dabble-mcp --export <export.json> outline <project_id>
+dabble-mcp --export <export.json> --project "<project title>" outline
+dabble-mcp --export <export.json> chapter-packet <project_id> <chapter_id>
+dabble-mcp --export <export.json> --project "<project title>" chapter-packet <chapter_id>
+dabble-mcp --export <export.json> search <project_id> "search text"
+dabble-mcp --export <export.json> --project "<project title>" search "search text"
+dabble-mcp --export <export.json> build-summary-tasks <project_id> .dabble-tasks/<project_id>
+dabble-mcp --export <export.json> --project "<project title>" build-summary-tasks .dabble-tasks/<project_id>
+dabble-mcp --export <export.json> run-summary-tasks .dabble-tasks/<project_id>
+dabble-mcp --export <export.json> run-summary-tasks .dabble-tasks/<project_id> --pending-only
+dabble-mcp --export <export.json> run-summary-tasks .dabble-tasks/<project_id> --failed-only
+dabble-mcp --export <export.json> task-status .dabble-tasks/<project_id>
+dabble-mcp --export <export.json> task-status .dabble-tasks/<project_id> --pending-only
+dabble-mcp --export <export.json> task-status .dabble-tasks/<project_id> --failed-only
+dabble-mcp --export <export.json> task-status .dabble-tasks/<project_id> --completed-only
+dabble-mcp --export <export.json> cleanup-successful-tasks .dabble-tasks/<project_id> --dry-run
+dabble-mcp --export <export.json> cleanup-successful-tasks .dabble-tasks/<project_id>
+dabble-mcp --export <export.json> cleanup-successful-tasks .dabble-tasks/<project_id> --remove-results
+dabble-mcp --export <export.json> compile-brief .dabble-tasks/<project_id>
+dabble-mcp --export <export.json> serve
+```
+
+`--project` accepts either a project ID or an exact project title.
+
+## MCP usage
+
+Point your MCP client at the stdio command below:
+
+```bash
+PYTHONPATH=src python -m dabble_mcp.cli --export /absolute/path/to/export.json serve
+```
+
+The server exposes these tools:
+
+- `list_projects`
+- `get_project_outline`
+- `get_chapter_packet`
+- `search_project_text`
+- `build_chapter_summary_tasks`
+- `save_task_result`
+- `compile_story_brief`
+
+## Grounded chapter summary workflow
+
+1. Run `build-summary-tasks` for a project.
+2. Run `run-summary-tasks` to execute all generated task packets in batch and write results to `.dabble-tasks/<project_id>/results`.
+	This also writes `.dabble-tasks/<project_id>/task-status.json` with per-task `pending`, `completed`, or `failed` state.
+	Use `--pending-only` or `--failed-only` to rerun only targeted subsets.
+	If `OPENAI_API_KEY` (or `DABBLE_OPENAI_API_KEY`) is set, summaries are generated from each packet's `prompt_template` using an OpenAI-compatible chat completions API.
+	Local OpenAI-compatible servers on `localhost` such as Ollama can be used without an API key by setting `OPENAI_BASE_URL` or `DABBLE_OPENAI_BASE_URL`.
+	Long chapters are chunked and summarized in multiple passes so the final summary reflects beginning, middle, and ending events.
+	Optional overrides: `DABBLE_SUMMARY_MODEL` (default `gpt-5.4-mini`), `DABBLE_SUMMARY_CHUNK_CHARS` (default `18000`), and `OPENAI_BASE_URL`/`DABBLE_OPENAI_BASE_URL`.
+	If no model credentials are configured, the command falls back to a deterministic balanced summary. To force fallback even when a key exists, set `DABBLE_FORCE_FALLBACK_SUMMARY=1`.
+3. Run `compile-brief` to assemble the saved summaries into a novel-level brief in manuscript chapter order.
+4. Optional cleanup: run `cleanup-successful-tasks` to delete completed task packet files and keep only remaining work.
+	Use `--dry-run` first to preview deletions, and `--remove-results` only if you also want to delete completed result files.
+
+Example:
+
+```bash
+PYTHONPATH=src python -m dabble_mcp.cli --export <export.json> --project "JOAT Alternate Order" build-summary-tasks .dabble-tasks/dccdSKkJDkAuyl9Z
+PYTHONPATH=src python -m dabble_mcp.cli --export <export.json> run-summary-tasks .dabble-tasks/dccdSKkJDkAuyl9Z
+PYTHONPATH=src python -m dabble_mcp.cli --export <export.json> task-status .dabble-tasks/dccdSKkJDkAuyl9Z
+PYTHONPATH=src python -m dabble_mcp.cli --export <export.json> compile-brief .dabble-tasks/dccdSKkJDkAuyl9Z
+```
+
+### Ollama local setup
+
+Install Ollama, pull the model, and point the summary workflow at the local OpenAI-compatible endpoint:
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+ollama serve
+ollama pull qwen2.5:14b-instruct
+
+export OPENAI_BASE_URL=http://localhost:11434/v1
+export DABBLE_SUMMARY_MODEL=qwen2.5:14b-instruct
+```
+
+Then run:
+
+```bash
+PYTHONPATH=src python -m dabble_mcp.cli --export <export.json> run-summary-tasks .dabble-tasks/<project_id>
+```
+
+Each chapter packet includes a strict prompt template that tells the agent to stay inside the supplied evidence and admit when the source is incomplete.
+This application is a live interface to all the creative writings of David Ray Christiansen. It uses a JSON export from Dabble (dabblewriter.com) to query my writing data.
+
+## Important tasks I want this app to be able to do
+- List all the stories in the export
+- Create a brief synopsis for each story
+- Identify the genre of all stories in the export

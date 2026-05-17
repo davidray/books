@@ -1,0 +1,2 @@
+[console_scripts]
+dabble-mcp = dabble_mcp.cli:main
