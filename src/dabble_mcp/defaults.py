@@ -83,3 +83,14 @@ def get_base_url_default() -> str | None:
 def set_base_url_default(base_url: str | None) -> dict[str, Any]:
     """Set the default OpenAI-compatible base URL."""
     return set_default("base_url", base_url)
+
+
+def get_db_default() -> str | None:
+    """Get the default SQLite database path."""
+    return get_default("db")
+
+
+def set_db_default(db_path: str | None) -> dict[str, Any]:
+    """Set the default SQLite database path."""
+    return set_default("db", db_path)
+

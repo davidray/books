@@ -4,10 +4,9 @@ This repository now includes a small local app for querying Dabble exports and e
 
 ## What it does
 
-- Loads a Dabble export JSON file.
-- Reconstructs the latest project state from the newest snapshot plus trailing patch operations.
+- Imports a Dabble export JSON file into a SQLite database (patches applied once at import time).
 - Treats only content under the `manuscript` tree as novel content; notes and non-manuscript branches are ignored.
-- Exposes project, outline, chapter packet, and text search tools through MCP.
+- Exposes project, outline, chapter packet, and full-text search tools through MCP.
 - Writes one grounded chapter-summary task packet per chapter so multiple agent sessions can process a novel incrementally.
 - Persists chapter summary results and combines them into a novel-level brief.
 
@@ -21,7 +20,34 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-Then run the CLI:
+### Recommended: run the setup script
+
+The interactive setup script handles everything — picking your export file, creating the database, importing data, choosing an LLM, and saving defaults:
+
+```bash
+./install.sh
+```
+
+### Manual setup: import to SQLite
+
+Or do it step by step. Convert your Dabble export to a SQLite database once — all subsequent queries read from the fast SQLite backend, no JSON parsing or patch replay at query time:
+
+```bash
+dabble-mcp import Exports/dabble-Vca481KELEbtliXfXKHxHpzRNqo2-2026-05-17T08_15_32.740Z.json --db .dabble-tasks/dabble.db
+```
+
+Then set defaults so you don't have to repeat flags every time:
+
+```bash
+dabble-mcp set-defaults db .dabble-tasks/dabble.db
+dabble-mcp list-projects
+```
+
+Re-run `import` whenever you get a fresh export from Dabble.
+
+### Alternate: query the JSON export directly
+
+The original `--export` path still works for backward compatibility:
 
 ```bash
 dabble-mcp --export Exports/dabble-Vca481KELEbtliXfXKHxHpzRNqo2-2026-05-17T08_15_32.740Z.json list-projects
@@ -31,27 +57,34 @@ dabble-mcp --export Exports/dabble-Vca481KELEbtliXfXKHxHpzRNqo2-2026-05-17T08_15
 
 ## Setting defaults
 
-You can set default values for `--export`, `--project`, `model`, and `base-url` to avoid specifying them in every command:
+You can set default values for `--db`, `--export`, `--project`, `model`, and `base-url` to avoid specifying them in every command:
 
 ```bash
 # Set defaults
+dabble-mcp set-defaults db <path>
 dabble-mcp set-defaults export <path>
 dabble-mcp set-defaults project <project_id>
 dabble-mcp set-defaults model <model_name>
 dabble-mcp set-defaults base-url <url>
-dabble-mcp set-defaults export <path> project <project_id> model <model_name> base-url <url>
+dabble-mcp set-defaults db <path> project <project_id> model <model_name> base-url <url>
 
 # List current defaults
 dabble-mcp list-defaults
 ```
 
+When both `db` and `export` defaults are set, `db` takes precedence.
+
 Defaults are stored in `.dabble-tasks/defaults.json` and are preserved when cleaning up task files.
 
 ## CLI commands
 
-With defaults set, you can omit `--export` and `--project`:
+With defaults set, you can omit `--db`/`--export` and `--project`:
 
 ```bash
+# Import (one-time per new export)
+dabble-mcp import <export.json> --db <output.db>
+dabble-mcp import <export.json>          # uses db default if set, else .dabble-tasks/dabble.db
+
 # Using defaults
 dabble-mcp list-projects
 dabble-mcp outline <project_id>
@@ -59,41 +92,48 @@ dabble-mcp chapter-packet <chapter_id>
 dabble-mcp search "search text"
 
 # Overriding defaults
+dabble-mcp --db <other.db> list-projects
 dabble-mcp --export <other.json> list-projects
 dabble-mcp --project "<other project>" outline
 ```
 
-All commands support optional `--export` and `--project` flags to override defaults:
+All commands support optional `--db`, `--export`, and `--project` flags to override defaults (`--db` takes precedence over `--export`):
 
 ```bash
-dabble-mcp --export <export.json> list-projects
-dabble-mcp --export <export.json> outline <project_id>
-dabble-mcp --export <export.json> --project "<project title>" outline
-dabble-mcp --export <export.json> chapter-packet <project_id> <chapter_id>
-dabble-mcp --export <export.json> --project "<project title>" chapter-packet <chapter_id>
-dabble-mcp --export <export.json> search <project_id> "search text"
-dabble-mcp --export <export.json> --project "<project title>" search "search text"
-dabble-mcp --export <export.json> build-summary-tasks <project_id> .dabble-tasks/<project_id>
-dabble-mcp --export <export.json> --project "<project title>" build-summary-tasks .dabble-tasks/<project_id>
-dabble-mcp --export <export.json> run-summary-tasks .dabble-tasks/<project_id>
-dabble-mcp --export <export.json> run-summary-tasks .dabble-tasks/<project_id> --pending-only
-dabble-mcp --export <export.json> run-summary-tasks .dabble-tasks/<project_id> --failed-only
-dabble-mcp --export <export.json> task-status .dabble-tasks/<project_id>
-dabble-mcp --export <export.json> task-status .dabble-tasks/<project_id> --pending-only
-dabble-mcp --export <export.json> task-status .dabble-tasks/<project_id> --failed-only
-dabble-mcp --export <export.json> task-status .dabble-tasks/<project_id> --completed-only
-dabble-mcp --export <export.json> cleanup-successful-tasks .dabble-tasks/<project_id> --dry-run
-dabble-mcp --export <export.json> cleanup-successful-tasks .dabble-tasks/<project_id>
-dabble-mcp --export <export.json> cleanup-successful-tasks .dabble-tasks/<project_id> --remove-results
-dabble-mcp --export <export.json> compile-brief .dabble-tasks/<project_id>
-dabble-mcp --export <export.json> serve
+dabble-mcp --db <dabble.db> list-projects
+dabble-mcp --db <dabble.db> outline <project_id>
+dabble-mcp --db <dabble.db> --project "<project title>" outline
+dabble-mcp --db <dabble.db> chapter-packet <project_id> <chapter_id>
+dabble-mcp --db <dabble.db> --project "<project title>" chapter-packet <chapter_id>
+dabble-mcp --db <dabble.db> search <project_id> "search text"
+dabble-mcp --db <dabble.db> --project "<project title>" search "search text"
+dabble-mcp --db <dabble.db> build-summary-tasks <project_id> .dabble-tasks/<project_id>
+dabble-mcp --db <dabble.db> --project "<project title>" build-summary-tasks .dabble-tasks/<project_id>
+dabble-mcp --db <dabble.db> run-summary-tasks .dabble-tasks/<project_id>
+dabble-mcp --db <dabble.db> run-summary-tasks .dabble-tasks/<project_id> --pending-only
+dabble-mcp --db <dabble.db> run-summary-tasks .dabble-tasks/<project_id> --failed-only
+dabble-mcp --db <dabble.db> task-status .dabble-tasks/<project_id>
+dabble-mcp --db <dabble.db> task-status .dabble-tasks/<project_id> --pending-only
+dabble-mcp --db <dabble.db> task-status .dabble-tasks/<project_id> --failed-only
+dabble-mcp --db <dabble.db> task-status .dabble-tasks/<project_id> --completed-only
+dabble-mcp --db <dabble.db> cleanup-successful-tasks .dabble-tasks/<project_id> --dry-run
+dabble-mcp --db <dabble.db> cleanup-successful-tasks .dabble-tasks/<project_id>
+dabble-mcp --db <dabble.db> cleanup-successful-tasks .dabble-tasks/<project_id> --remove-results
+dabble-mcp --db <dabble.db> compile-brief .dabble-tasks/<project_id>
+dabble-mcp --db <dabble.db> serve
 ```
 
 `--project` accepts either a project ID or an exact project title.
 
 ## MCP usage
 
-Point your MCP client at the stdio command below:
+Point your MCP client at the stdio command below (SQLite backend recommended):
+
+```bash
+dabble-mcp --db /absolute/path/to/dabble.db serve
+```
+
+Or using the JSON export directly (backward compatible):
 
 ```bash
 dabble-mcp --export /absolute/path/to/export.json serve

@@ -2,6 +2,7 @@ README.md
 pyproject.toml
 src/dabble_mcp/__init__.py
 src/dabble_mcp/cli.py
+src/dabble_mcp/db.py
 src/dabble_mcp/defaults.py
 src/dabble_mcp/export_loader.py
 src/dabble_mcp/mcp_server.py

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -13,8 +14,11 @@ from urllib import request as urlrequest
 from .defaults import get_base_url_default, get_model_default
 from .export_loader import DabbleExport
 
+# Accept either JSON-backed or SQLite-backed data source.
+DabbleDataSource = Any
 
-def write_chapter_summary_tasks(export_data: DabbleExport, project_id: str, output_dir: str | Path) -> dict[str, Any]:
+
+def write_chapter_summary_tasks(export_data: DabbleDataSource, project_id: str, output_dir: str | Path) -> dict[str, Any]:
     target_dir = Path(output_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
     packets = export_data.chapter_packets(project_id)
@@ -178,6 +182,177 @@ def run_summary_tasks(
 
     return {
         "task_dir": str(task_dir),
+        "processed": processed,
+        "failed": failed,
+        "skipped_existing": skipped_existing,
+        "skipped_limit": skipped_limit,
+        "skipped_filter": skipped_filter,
+        "applied_filter": status_filter or "all",
+        "status_file": str(status_path),
+        "written_files": written_files,
+    }
+
+
+def run_summary_task_queue(
+    output_dir: str | Path,
+    *,
+    overwrite: bool = False,
+    limit: int | None = None,
+    status_filter: str | None = None,
+    progress_callback: Callable[[dict[str, object]], None] | None = None,
+) -> dict[str, Any]:
+    """Process matching summary tasks one-at-a-time with optional progress callbacks."""
+    task_dir = Path(output_dir)
+    result_dir = task_dir / "results"
+    result_dir.mkdir(parents=True, exist_ok=True)
+    status_path = task_dir / "task-status.json"
+    status_doc = _load_status_doc(task_dir)
+    _reconcile_status_tasks(task_dir, status_doc)
+    _sync_pending_statuses(status_doc)
+
+    task_files = sorted(
+        file_path
+        for file_path in task_dir.glob("*.json")
+        if file_path.name not in {"manifest.json", "task-status.json"}
+    )
+
+    queued: list[tuple[Path, dict[str, Any], str]] = []
+    skipped_filter = 0
+    for task_file in task_files:
+        packet = json.loads(task_file.read_text(encoding="utf-8"))
+        chapter_id = packet.get("chapter_id")
+        if not chapter_id:
+            continue
+
+        result_file = result_dir / f"{chapter_id}.json"
+        task_key = task_file.name
+        status_doc["tasks"].setdefault(
+            task_key,
+            {
+                "chapter_id": chapter_id,
+                "task_file": str(task_file),
+                "result_file": str(result_file),
+                "status": "pending",
+                "updated_at": _iso_now(),
+                "error": None,
+            },
+        )
+
+        current_status = status_doc["tasks"][task_key].get("status", "pending")
+        if status_filter and current_status != status_filter:
+            skipped_filter += 1
+            continue
+        queued.append((task_file, packet, str(chapter_id)))
+
+    capped_queue = queued
+    if limit is not None and limit > 0:
+        capped_queue = queued[:limit]
+    skipped_limit = max(0, len(queued) - len(capped_queue))
+
+    if progress_callback:
+        progress_callback(
+            {
+                "event": "queue_started",
+                "task_dir": str(task_dir),
+                "total": len(capped_queue),
+            }
+        )
+
+    processed = 0
+    skipped_existing = 0
+    failed = 0
+    written_files: list[str] = []
+
+    for index, (task_file, packet, chapter_id) in enumerate(capped_queue, start=1):
+        result_file = result_dir / f"{chapter_id}.json"
+        task_key = task_file.name
+        task_entry = status_doc["tasks"][task_key]
+
+        if progress_callback:
+            progress_callback(
+                {
+                    "event": "task_started",
+                    "index": index,
+                    "total": len(capped_queue),
+                    "chapter_id": chapter_id,
+                    "chapter_title": packet.get("chapter_title"),
+                    "chapter_order": packet.get("chapter_order"),
+                }
+            )
+
+        if result_file.exists() and not overwrite:
+            skipped_existing += 1
+            task_entry["status"] = "completed"
+            task_entry["error"] = None
+            task_entry["updated_at"] = _iso_now()
+            if progress_callback:
+                progress_callback(
+                    {
+                        "event": "task_finished",
+                        "index": index,
+                        "total": len(capped_queue),
+                        "chapter_id": chapter_id,
+                        "chapter_title": packet.get("chapter_title"),
+                        "chapter_order": packet.get("chapter_order"),
+                        "outcome": "skipped",
+                    }
+                )
+            continue
+
+        try:
+            summary = _build_summary(packet)
+            evidence = _build_evidence(packet)
+            written_path = save_task_result(
+                task_dir,
+                chapter_id,
+                summary,
+                evidence,
+                chapter_title=packet.get("chapter_title"),
+                chapter_order=packet.get("chapter_order"),
+            )
+            written_files.append(written_path)
+            processed += 1
+            task_entry["status"] = "completed"
+            task_entry["error"] = None
+            task_entry["updated_at"] = _iso_now()
+            if progress_callback:
+                progress_callback(
+                    {
+                        "event": "task_finished",
+                        "index": index,
+                        "total": len(capped_queue),
+                        "chapter_id": chapter_id,
+                        "chapter_title": packet.get("chapter_title"),
+                        "chapter_order": packet.get("chapter_order"),
+                        "outcome": "processed",
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            task_entry["status"] = "failed"
+            task_entry["error"] = str(exc)
+            task_entry["updated_at"] = _iso_now()
+            if progress_callback:
+                progress_callback(
+                    {
+                        "event": "task_finished",
+                        "index": index,
+                        "total": len(capped_queue),
+                        "chapter_id": chapter_id,
+                        "chapter_title": packet.get("chapter_title"),
+                        "chapter_order": packet.get("chapter_order"),
+                        "outcome": "failed",
+                        "error": str(exc),
+                    }
+                )
+
+    _sync_pending_statuses(status_doc)
+    status_doc["updated_at"] = _iso_now()
+    status_path.write_text(json.dumps(status_doc, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    return {
+        "task_dir": str(task_dir),
+        "queued": len(capped_queue),
         "processed": processed,
         "failed": failed,
         "skipped_existing": skipped_existing,

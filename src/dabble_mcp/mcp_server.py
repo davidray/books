@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .db import DabbleDatabase
 from .export_loader import DabbleExport
 from .tasks import compile_story_brief, save_task_result, write_chapter_summary_tasks
 
@@ -22,8 +23,13 @@ class ToolSpec:
 
 
 class DabbleMcpServer:
-    def __init__(self, export_path: str | Path):
-        self.export_data = DabbleExport.from_file(export_path)
+    def __init__(self, export_path: str | Path | None = None, db_path: str | Path | None = None):
+        if db_path is not None:
+            self.data: DabbleDatabase | DabbleExport = DabbleDatabase(db_path)
+        elif export_path is not None:
+            self.data = DabbleExport.from_file(export_path)
+        else:
+            raise ValueError("Either export_path or db_path must be provided")
         self.tools = {
             tool.name: tool
             for tool in [
@@ -31,7 +37,7 @@ class DabbleMcpServer:
                     name="list_projects",
                     description="List projects available in the Dabble export.",
                     input_schema={"type": "object", "properties": {}},
-                    handler=lambda _: self.export_data.list_projects(),
+                    handler=lambda _: self.data.list_projects(),
                 ),
                 ToolSpec(
                     name="get_project_outline",
@@ -41,7 +47,7 @@ class DabbleMcpServer:
                         "properties": {"project_id": {"type": "string"}},
                         "required": ["project_id"],
                     },
-                    handler=lambda arguments: self.export_data.build_outline(arguments["project_id"]),
+                    handler=lambda arguments: self.data.build_outline(arguments["project_id"]),
                 ),
                 ToolSpec(
                     name="get_chapter_packet",
@@ -54,7 +60,7 @@ class DabbleMcpServer:
                         },
                         "required": ["project_id", "chapter_id"],
                     },
-                    handler=lambda arguments: self.export_data.chapter_packet(arguments["project_id"], arguments["chapter_id"]),
+                    handler=lambda arguments: self.data.chapter_packet(arguments["project_id"], arguments["chapter_id"]),
                 ),
                 ToolSpec(
                     name="search_project_text",
@@ -68,7 +74,7 @@ class DabbleMcpServer:
                         },
                         "required": ["project_id", "query"],
                     },
-                    handler=lambda arguments: self.export_data.search_text(arguments["project_id"], arguments["query"], arguments.get("limit", 20)),
+                    handler=lambda arguments: self.data.search_text(arguments["project_id"], arguments["query"], arguments.get("limit", 20)),
                 ),
                 ToolSpec(
                     name="build_chapter_summary_tasks",
@@ -81,7 +87,7 @@ class DabbleMcpServer:
                         },
                         "required": ["project_id", "output_dir"],
                     },
-                    handler=lambda arguments: write_chapter_summary_tasks(self.export_data, arguments["project_id"], arguments["output_dir"]),
+                    handler=lambda arguments: write_chapter_summary_tasks(self.data, arguments["project_id"], arguments["output_dir"]),
                 ),
                 ToolSpec(
                     name="save_task_result",
