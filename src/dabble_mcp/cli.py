@@ -6,13 +6,16 @@ import sys
 from pathlib import Path
 
 from .defaults import (
+    get_db_default,
     get_export_default,
     get_project_default,
     load_defaults,
     set_default,
     set_base_url_default,
+    set_db_default,
     set_model_default,
 )
+from .db import DabbleDatabase
 from .export_loader import DabbleExport
 from .mcp_server import DabbleMcpServer
 from .tasks import (
@@ -92,6 +95,10 @@ def handle_set_defaults(args: argparse.Namespace) -> int:
             defaults = set_base_url_default(args.arg[i + 1])
             print(f"Base URL default set to: {args.arg[i + 1]}")
             i += 2
+        elif key == "db" and i + 1 < len(args.arg):
+            defaults = set_db_default(args.arg[i + 1])
+            print(f"DB default set to: {args.arg[i + 1]}")
+            i += 2
         else:
             print(f"Unknown option or missing value: {key}", file=__import__("sys").stderr)
             return 1
@@ -142,6 +149,7 @@ def emit_queue_progress(event: dict[str, object]) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Query Dabble exports and expose grounded story tools.")
     parser.add_argument("--export", required=False, help="Path to the Dabble export JSON file (uses default if not provided)")
+    parser.add_argument("--db", required=False, help="Path to the SQLite database (preferred over --export when both are present)")
     parser.add_argument(
         "--project",
         help="Project ID or exact project title. Can replace positional project_id in most commands (uses default if not provided).",
@@ -150,11 +158,15 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("list-projects", help="List projects in the export")
-    
-    subparsers.add_parser("set-defaults", help="Set default export, project, model, and/or base-url").add_argument(
+
+    import_parser = subparsers.add_parser("import", help="Convert a Dabble JSON export to a SQLite database")
+    import_parser.add_argument("export_file", nargs="?", help="Path to the Dabble export JSON file (uses --export default if omitted)")
+    import_parser.add_argument("--db", dest="import_db", help="Output SQLite database path (default: .dabble-tasks/dabble.db)")
+
+    subparsers.add_parser("set-defaults", help="Set default export, project, model, db, and/or base-url").add_argument(
         "arg",
         nargs="*",
-        help="Set defaults: 'export <path>', 'project <project_id>', 'model <model_name>', 'base-url <url>', or combinations",
+        help="Set defaults: 'export <path>', 'project <project_id>', 'model <model_name>', 'base-url <url>', 'db <path>', or combinations",
     )
 
     subparsers.add_parser("list-defaults", help="List current default export and project")
@@ -249,13 +261,33 @@ def main() -> int:
     if args.command == "list-defaults":
         return handle_list_defaults()
 
-    # For other commands, resolve export and project
-    export_path_str = args.export or get_export_default()
-    if not export_path_str:
-        parser.error("--export is required or must be set via set-defaults command")
+    # Handle import command: JSON export → SQLite
+    if args.command == "import":
+        export_path_str = getattr(args, "export_file", None) or args.export or get_export_default()
+        if not export_path_str:
+            parser.error("import requires an export file path or --export default")
+        export_path = resolve_export_path(export_path_str)
+        db_path_str = getattr(args, "import_db", None) or args.db or get_db_default() or str(Path(".dabble-tasks") / "dabble.db")
+        db_path = Path(db_path_str)
+        print(f"Importing {export_path} → {db_path} ...", file=sys.stderr)
+        export_data = DabbleExport.from_file(export_path)
+        DabbleDatabase.import_from_export(export_data, db_path)
+        print(json.dumps({"db": str(db_path), "status": "ok"}, ensure_ascii=False, indent=2))
+        return 0
 
-    export_path = resolve_export_path(export_path_str)
-    export_data = DabbleExport.from_file(export_path)
+    # For all other commands, load the appropriate data source.
+    # Prefer --db (or db default) over --export.
+    db_path_str = args.db or get_db_default()
+    export_path_str = args.export or get_export_default()
+
+    if not db_path_str and not export_path_str:
+        parser.error("--db or --export is required, or set a default via set-defaults")
+
+    if db_path_str:
+        export_data: DabbleDatabase | DabbleExport = DabbleDatabase(db_path_str)
+    else:
+        export_path = resolve_export_path(export_path_str)  # type: ignore[arg-type]
+        export_data = DabbleExport.from_file(export_path)
 
     # Get project with defaults
     project_arg = args.project or get_project_default()
@@ -416,7 +448,9 @@ def main() -> int:
         )
         return 0
     if args.command == "serve":
-        return DabbleMcpServer(export_path).run()
+        if db_path_str:
+            return DabbleMcpServer(db_path=db_path_str).run()
+        return DabbleMcpServer(export_path=export_path).run()
 
     parser.error(f"Unsupported command: {args.command}")
     return 2
